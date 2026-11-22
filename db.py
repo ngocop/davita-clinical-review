@@ -1,0 +1,555 @@
+import os
+import sqlite3
+import ssl
+from datetime import datetime
+from urllib.parse import unquote, urlparse
+import pandas as pd
+import streamlit as st
+
+LOCAL_SQLITE_PATH = "clinic.db"
+
+PATIENT_COLUMNS = [
+    "ic_number",
+    "name",
+    "hd_since",
+    "hd_davita",
+    "sponsor",
+    "follow_up_hosp",
+]
+
+REVIEW_COLUMNS = [
+    "review_id",
+    "ic_number",
+    "review_date",
+    "active_diagnoses",
+    "admission_hx",
+    "transplant_status",
+    "access_details",
+    "blood_pump",
+    "dialysate_flow",
+    "frequency",
+    "duration",
+    "dialyzer",
+    "hep_loading",
+    "hep_maintenance",
+    "dry_weight",
+    "dialysate_ca",
+    "bp_pre_post",
+    "idwg",
+    "uf",
+    "venous_pressure",
+    "kt_v",
+    "urr",
+    "hb",
+    "ferritin",
+    "tsats",
+    "iv_erysaa",
+    "c_ca",
+    "phosphate",
+    "alp",
+    "ipth",
+    "parathyroidectomy",
+    "predialysis_cr",
+    "albumin",
+    "chol",
+    "anti_hbs",
+    "alt_ggt",
+    "fbs_hba1c",
+    "highlights",
+    "medications_list",
+    "clinical_notes",
+]
+
+REVIEW_DATA_COLUMNS = [c for c in REVIEW_COLUMNS if c not in ("review_id", "ic_number")]
+
+
+class SQLiteBackend:
+    def __init__(self, db_path: str = LOCAL_SQLITE_PATH):
+        self.db_path = db_path
+        self.is_sqlite = True
+
+
+class PostgresBackend:
+    def __init__(self, raw_url: str):
+        self.raw_url = raw_url.strip()
+        self.is_sqlite = False
+
+    def connect(self):
+        import pg8000.dbapi
+
+        parsed = urlparse(self.raw_url)
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        return pg8000.dbapi.connect(
+            user=unquote(parsed.username or "postgres"),
+            password=unquote(parsed.password or ""),
+            host=parsed.hostname,
+            port=parsed.port or 5432,
+            database=parsed.path.lstrip("/") or "postgres",
+            ssl_context=ssl_ctx,
+            timeout=15,
+        )
+
+
+def get_configured_supabase_url() -> str | None:
+    try:
+        url = st.secrets.get("connections", {}).get("supabase", {}).get("url")
+        return str(url).strip() if url else None
+    except Exception:
+        return None
+
+
+def _init_sqlite_schema(db_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS "Patients" (
+                ic_number TEXT PRIMARY KEY,
+                name TEXT,
+                hd_since TEXT,
+                hd_davita TEXT,
+                sponsor TEXT,
+                follow_up_hosp TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS "Reviews" (
+                review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ic_number TEXT,
+                review_date TEXT,
+                active_diagnoses TEXT,
+                admission_hx TEXT,
+                transplant_status TEXT,
+                access_details TEXT,
+                blood_pump TEXT,
+                dialysate_flow TEXT,
+                frequency TEXT,
+                duration TEXT,
+                dialyzer TEXT,
+                hep_loading TEXT,
+                hep_maintenance TEXT,
+                dry_weight TEXT,
+                dialysate_ca TEXT,
+                bp_pre_post TEXT,
+                idwg TEXT,
+                uf TEXT,
+                venous_pressure TEXT,
+                kt_v TEXT,
+                urr TEXT,
+                hb TEXT,
+                ferritin TEXT,
+                tsats TEXT,
+                iv_erysaa TEXT,
+                c_ca TEXT,
+                phosphate TEXT,
+                alp TEXT,
+                ipth TEXT,
+                parathyroidectomy TEXT,
+                predialysis_cr TEXT,
+                albumin TEXT,
+                chol TEXT,
+                anti_hbs TEXT,
+                alt_ggt TEXT,
+                fbs_hba1c TEXT,
+                highlights TEXT,
+                medications_list TEXT,
+                clinical_notes TEXT,
+                FOREIGN KEY (ic_number) REFERENCES "Patients" (ic_number)
+            )
+        """)
+        existing_cols = {row[1] for row in cur.execute('PRAGMA table_info("Reviews")').fetchall()}
+        for col in ("highlights", "parathyroidectomy"):
+            if col not in existing_cols:
+                cur.execute(f'ALTER TABLE "Reviews" ADD COLUMN {col} TEXT')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _init_postgres_schema(backend: PostgresBackend) -> None:
+    conn = backend.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS "Patients" (
+                ic_number TEXT PRIMARY KEY,
+                name TEXT,
+                hd_since TEXT,
+                hd_davita TEXT,
+                sponsor TEXT,
+                follow_up_hosp TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS "Reviews" (
+                review_id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                ic_number TEXT REFERENCES "Patients"(ic_number),
+                review_date TEXT,
+                active_diagnoses TEXT,
+                admission_hx TEXT,
+                transplant_status TEXT,
+                access_details TEXT,
+                blood_pump TEXT,
+                dialysate_flow TEXT,
+                frequency TEXT,
+                duration TEXT,
+                dialyzer TEXT,
+                hep_loading TEXT,
+                hep_maintenance TEXT,
+                dry_weight TEXT,
+                dialysate_ca TEXT,
+                bp_pre_post TEXT,
+                idwg TEXT,
+                uf TEXT,
+                venous_pressure TEXT,
+                kt_v TEXT,
+                urr TEXT,
+                hb TEXT,
+                ferritin TEXT,
+                tsats TEXT,
+                iv_erysaa TEXT,
+                c_ca TEXT,
+                phosphate TEXT,
+                alp TEXT,
+                ipth TEXT,
+                parathyroidectomy TEXT,
+                predialysis_cr TEXT,
+                albumin TEXT,
+                chol TEXT,
+                anti_hbs TEXT,
+                alt_ggt TEXT,
+                fbs_hba1c TEXT,
+                highlights TEXT,
+                medications_list TEXT,
+                clinical_notes TEXT
+            )
+        """)
+        for col in ("highlights", "parathyroidectomy"):
+            cur.execute(f'ALTER TABLE "Reviews" ADD COLUMN IF NOT EXISTS {col} TEXT')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@st.cache_resource(show_spinner=False)
+def _get_cached_sqlite_backend(db_path: str = LOCAL_SQLITE_PATH) -> SQLiteBackend:
+    backend = SQLiteBackend(db_path)
+    _init_sqlite_schema(db_path)
+    return backend
+
+
+@st.cache_resource(show_spinner=False)
+def _get_cached_postgres_backend(raw_url: str) -> PostgresBackend:
+    backend = PostgresBackend(raw_url)
+    conn = backend.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+    finally:
+        conn.close()
+    _init_postgres_schema(backend)
+    return backend
+
+
+def get_db_engine(use_local_fallback: bool = False):
+    supabase_url = None if use_local_fallback else get_configured_supabase_url()
+    if supabase_url:
+        try:
+            return _get_cached_postgres_backend(supabase_url), "Supabase (Cloud)"
+        except Exception as exc:
+            st.warning(f"Supabase unavailable ({exc}). Using local `clinic.db` fallback.")
+            return _get_cached_sqlite_backend(LOCAL_SQLITE_PATH), "Local SQLite (Fallback)"
+
+    return _get_cached_sqlite_backend(LOCAL_SQLITE_PATH), "Local SQLite"
+
+
+def sync_local_to_supabase(db_path: str = LOCAL_SQLITE_PATH) -> tuple[bool, str]:
+    """Push all local Patients and Reviews cleanly to Supabase via pure-Python pg8000."""
+    supabase_url = get_configured_supabase_url()
+    if not supabase_url:
+        return False, "Supabase URL is not configured in secrets.toml."
+    if not os.path.exists(db_path):
+        return False, f"Local database `{db_path}` not found."
+
+    local_conn = sqlite3.connect(db_path)
+    try:
+        patients_df = pd.read_sql_query('SELECT * FROM "Patients"', local_conn).fillna("")
+        reviews_df = pd.read_sql_query('SELECT * FROM "Reviews"', local_conn).fillna("")
+    finally:
+        local_conn.close()
+
+    try:
+        pg_backend = PostgresBackend(supabase_url)
+        _init_postgres_schema(pg_backend)
+        pg_conn = pg_backend.connect()
+        try:
+            cur = pg_conn.cursor()
+            cur.execute('TRUNCATE TABLE "Reviews", "Patients" RESTART IDENTITY CASCADE')
+
+            p_cols = ", ".join(PATIENT_COLUMNS)
+            p_ph = ", ".join(["%s"] * len(PATIENT_COLUMNS))
+            for _, p_row in patients_df.iterrows():
+                cur.execute(
+                    f'INSERT INTO "Patients" ({p_cols}) VALUES ({p_ph})',
+                    [str(p_row.get(c, "")) for c in PATIENT_COLUMNS],
+                )
+
+            r_cols = ", ".join(["review_id", "ic_number"] + REVIEW_DATA_COLUMNS)
+            r_ph = ", ".join(["%s"] * (2 + len(REVIEW_DATA_COLUMNS)))
+            for _, r_row in reviews_df.iterrows():
+                vals = [int(r_row["review_id"]), str(r_row["ic_number"])] + [
+                    str(r_row.get(c, "")) for c in REVIEW_DATA_COLUMNS
+                ]
+                cur.execute(f'INSERT INTO "Reviews" ({r_cols}) VALUES ({r_ph})', vals)
+
+            cur.execute("""
+                SELECT setval(
+                    pg_get_serial_sequence('"Reviews"', 'review_id'),
+                    COALESCE((SELECT MAX(review_id) FROM "Reviews"), 0) + 1,
+                    false
+                )
+            """)
+            pg_conn.commit()
+        finally:
+            pg_conn.close()
+        return True, f"Synced {len(patients_df)} patients and {len(reviews_df)} reviews to Supabase!"
+    except Exception as exc:
+        return False, f"Sync failed: {exc}"
+
+
+def _parse_sort_date(value) -> datetime:
+    if not value:
+        return datetime.min
+    s = str(value).strip()
+    s_norm = s.replace("Oktober", "October").replace("Okt", "Oct")
+    for fmt in (
+        "%Y-%m-%d",
+        "%d-%b-%Y",
+        "%d-%B-%Y",
+        "%d-%m-%Y",
+        "%d-%m-%y",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%d/%m/%Y",
+    ):
+        try:
+            return datetime.strptime(s_norm, fmt)
+        except ValueError:
+            continue
+    return datetime.min
+
+
+def _pg_query_df(backend: PostgresBackend, query: str, params: tuple = ()) -> pd.DataFrame:
+    conn = backend.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in cur.description] if cur.description else []
+        return pd.DataFrame(rows, columns=cols)
+    finally:
+        conn.close()
+
+
+def get_patients_list(backend) -> pd.DataFrame:
+    sql = 'SELECT ic_number, name FROM "Patients" ORDER BY name ASC, ic_number ASC'
+    if backend.is_sqlite:
+        conn = sqlite3.connect(backend.db_path)
+        try:
+            return pd.read_sql_query(sql, conn)
+        finally:
+            conn.close()
+    return _pg_query_df(backend, sql)
+
+
+def get_patient(backend, ic_number: str) -> pd.DataFrame:
+    if backend.is_sqlite:
+        conn = sqlite3.connect(backend.db_path)
+        try:
+            return pd.read_sql_query('SELECT * FROM "Patients" WHERE ic_number = ?', conn, params=(ic_number,))
+        finally:
+            conn.close()
+    return _pg_query_df(backend, 'SELECT * FROM "Patients" WHERE ic_number = %s', (ic_number,))
+
+
+def register_patient(backend, patient_data: dict) -> None:
+    vals = (
+        patient_data["ic_number"],
+        patient_data["name"],
+        patient_data["hd_since"],
+        patient_data["hd_davita"],
+        patient_data["sponsor"],
+        patient_data["follow_up_hosp"],
+    )
+    if backend.is_sqlite:
+        conn = sqlite3.connect(backend.db_path)
+        try:
+            conn.execute(
+                'INSERT INTO "Patients" (ic_number, name, hd_since, hd_davita, sponsor, follow_up_hosp) VALUES (?, ?, ?, ?, ?, ?)',
+                vals,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return
+
+    conn = backend.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            'INSERT INTO "Patients" (ic_number, name, hd_since, hd_davita, sponsor, follow_up_hosp) VALUES (%s, %s, %s, %s, %s, %s)',
+            vals,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_patient(backend, ic_number: str, patient_data: dict) -> None:
+    vals = (
+        patient_data["name"],
+        patient_data["hd_since"],
+        patient_data["hd_davita"],
+        patient_data["sponsor"],
+        patient_data["follow_up_hosp"],
+        ic_number,
+    )
+    if backend.is_sqlite:
+        conn = sqlite3.connect(backend.db_path)
+        try:
+            conn.execute(
+                'UPDATE "Patients" SET name = ?, hd_since = ?, hd_davita = ?, sponsor = ?, follow_up_hosp = ? WHERE ic_number = ?',
+                vals,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return
+
+    conn = backend.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            'UPDATE "Patients" SET name = %s, hd_since = %s, hd_davita = %s, sponsor = %s, follow_up_hosp = %s WHERE ic_number = %s',
+            vals,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_patient_reviews(backend, ic_number: str, ascending: bool = False) -> pd.DataFrame:
+    if backend.is_sqlite:
+        conn = sqlite3.connect(backend.db_path)
+        try:
+            df = pd.read_sql_query('SELECT * FROM "Reviews" WHERE ic_number = ?', conn, params=(ic_number,))
+        finally:
+            conn.close()
+    else:
+        df = _pg_query_df(backend, 'SELECT * FROM "Reviews" WHERE ic_number = %s', (ic_number,))
+
+    if df.empty:
+        return df
+
+    df = df.copy()
+    df["_sort_dt"] = df["review_date"].apply(_parse_sort_date)
+    df["_sort_id"] = pd.to_numeric(df["review_id"], errors="coerce").fillna(0)
+    df = df.sort_values(by=["_sort_dt", "_sort_id"], ascending=[ascending, ascending]).drop(
+        columns=["_sort_dt", "_sort_id"]
+    )
+    return df.reset_index(drop=True)
+
+
+def get_latest_review(backend, ic_number: str) -> pd.DataFrame:
+    df = get_patient_reviews(backend, ic_number, ascending=False)
+    return df.head(1) if not df.empty else df
+
+
+def save_review(backend, ic_number: str, review_values: dict, target_review_id=None) -> tuple[str, int | None]:
+    ordered_vals = [review_values.get(col, "") for col in REVIEW_DATA_COLUMNS]
+
+    if backend.is_sqlite:
+        conn = sqlite3.connect(backend.db_path)
+        try:
+            cur = conn.cursor()
+            if target_review_id is not None:
+                set_clause = ", ".join(f"{col} = ?" for col in REVIEW_DATA_COLUMNS)
+                cur.execute(f'UPDATE "Reviews" SET {set_clause} WHERE review_id = ?', ordered_vals + [int(target_review_id)])
+                conn.commit()
+                return "updated", int(target_review_id)
+
+            existing = cur.execute(
+                'SELECT review_id FROM "Reviews" WHERE ic_number = ? AND review_date = ?',
+                (ic_number, review_values.get("review_date", "")),
+            ).fetchone()
+
+            if existing:
+                existing_id = int(existing[0])
+                set_clause = ", ".join(f"{col} = ?" for col in REVIEW_DATA_COLUMNS)
+                cur.execute(f'UPDATE "Reviews" SET {set_clause} WHERE review_id = ?', ordered_vals + [existing_id])
+                conn.commit()
+                return "updated", existing_id
+
+            cols_sql = ", ".join(["ic_number"] + REVIEW_DATA_COLUMNS)
+            placeholders = ", ".join(["?"] * (1 + len(REVIEW_DATA_COLUMNS)))
+            cur.execute(f'INSERT INTO "Reviews" ({cols_sql}) VALUES ({placeholders})', [ic_number] + ordered_vals)
+            new_id = cur.lastrowid
+            conn.commit()
+            return "created", int(new_id) if new_id is not None else None
+        finally:
+            conn.close()
+
+    conn = backend.connect()
+    try:
+        cur = conn.cursor()
+        if target_review_id is not None:
+            set_clause = ", ".join(f"{col} = %s" for col in REVIEW_DATA_COLUMNS)
+            cur.execute(f'UPDATE "Reviews" SET {set_clause} WHERE review_id = %s', ordered_vals + [int(target_review_id)])
+            conn.commit()
+            return "updated", int(target_review_id)
+
+        cur.execute(
+            'SELECT review_id FROM "Reviews" WHERE ic_number = %s AND review_date = %s',
+            (ic_number, review_values.get("review_date", "")),
+        )
+        existing = cur.fetchone()
+        if existing:
+            existing_id = int(existing[0])
+            set_clause = ", ".join(f"{col} = %s" for col in REVIEW_DATA_COLUMNS)
+            cur.execute(f'UPDATE "Reviews" SET {set_clause} WHERE review_id = %s', ordered_vals + [existing_id])
+            conn.commit()
+            return "updated", existing_id
+
+        cols_sql = ", ".join(["ic_number"] + REVIEW_DATA_COLUMNS)
+        placeholders = ", ".join(["%s"] * (1 + len(REVIEW_DATA_COLUMNS)))
+        cur.execute(
+            f'INSERT INTO "Reviews" ({cols_sql}) VALUES ({placeholders}) RETURNING review_id',
+            [ic_number] + ordered_vals,
+        )
+        new_row = cur.fetchone()
+        conn.commit()
+        return "created", int(new_row[0]) if new_row and new_row[0] is not None else None
+    finally:
+        conn.close()
+
+
+def delete_review(backend, review_id: int) -> None:
+    if backend.is_sqlite:
+        conn = sqlite3.connect(backend.db_path)
+        try:
+            conn.execute('DELETE FROM "Reviews" WHERE review_id = ?', (int(review_id),))
+            conn.commit()
+        finally:
+            conn.close()
+        return
+
+    conn = backend.connect()
+    try:
+        cur = conn.cursor()
+        cur.execute('DELETE FROM "Reviews" WHERE review_id = %s', (int(review_id),))
+        conn.commit()
+    finally:
+        conn.close()
